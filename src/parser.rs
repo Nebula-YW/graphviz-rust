@@ -65,10 +65,15 @@ fn process_id(rule: Pair<Rule>) -> Id {
                 while let Some(c) = chars.next() {
                     if c == '\\' {
                         match chars.peek() {
-                            Some('\n') => { chars.next(); continue; }
+                            Some('\n') => {
+                                chars.next();
+                                continue;
+                            }
                             Some('\r') => {
                                 chars.next();
-                                if chars.peek() == Some(&'\n') { chars.next(); }
+                                if chars.peek() == Some(&'\n') {
+                                    chars.next();
+                                }
                                 continue;
                             }
                             Some(_) => {
@@ -673,4 +678,89 @@ mod test {
         digraph test { A:s -> B;}"#).unwrap();
         assert_eq!(g, graph!(di id!("test"); edge!(node_id!("A", port!(,"s")) => node_id!("B"))))
     }
+
+    #[test]
+    fn unicode_ids_and_dot_numerals() {
+        assert_eq!(process_id(_parse("été", Rule::id)), id!("été"));
+        assert_eq!(process_id(_parse("节点_1", Rule::id)), id!("节点_1"));
+        for numeral in ["1.", "-.5", "007", "-1.25"] {
+            assert_eq!(process_id(_parse(numeral, Rule::id)), id!(numeral));
+        }
+    }
+
+    #[test]
+    fn quoted_ids_concatenate_and_join_line_continuations() {
+        assert_eq!(
+            process_id(_parse(r#""ab" + "cd""#, Rule::id)),
+            id!(esc "abcd")
+        );
+        assert_eq!(
+            process_id(_parse("\"ab\\\ncd\" + \"e\\\r\nf\"", Rule::id)),
+            id!(esc "abcdef")
+        );
+        // Other escapes are kept for the attribute that interprets them.
+        assert_eq!(
+            process_id(_parse(r#""a\lb""#, Rule::id)),
+            id!(esc r#"a\lb"#)
+        );
+    }
+
+    #[test]
+    fn html_ids_may_be_single_level_or_nested() {
+        assert_eq!(process_id(_parse("<abc>", Rule::id)), id!(html "<abc>"));
+        assert_eq!(
+            process_id(_parse("<<b>x &gt; y</b>>", Rule::id)),
+            id!(html "<<b>x &gt; y</b>>")
+        );
+        assert_eq!(
+            process_id(_parse(r#"<<td title="a>b">x</td>>"#, Rule::id)),
+            id!(html r#"<<td title="a>b">x</td>>"#)
+        );
+    }
+
+    #[test]
+    fn keywords_are_case_insensitive_and_need_a_word_boundary() {
+        let g = parse("DiGraph G { NODE [shape=box]; SubGraph s { a } }").unwrap();
+        assert!(matches!(g, Graph::DiGraph { .. }));
+        assert!(matches!(
+            process_stmt(_parse("nodes", Rule::stmt)),
+            Stmt::Node(_)
+        ));
+        assert!(matches!(
+            process_stmt(_parse("edge_x", Rule::stmt)),
+            Stmt::Node(_)
+        ));
+        assert!(matches!(
+            process_stmt(_parse("Edge [color=red]", Rule::stmt)),
+            Stmt::GAttribute(GraphAttributes::Edge(_))
+        ));
+    }
+
+    #[test]
+    fn compass_points_may_be_any_id() {
+        assert_eq!(
+            process_node_id(_parse(r#"a:p:"ne""#, Rule::node_id)),
+            NodeId(id!("a"), Some(Port(Some(id!("p")), Some(r#""ne""#.to_string()))))
+        );
+        assert!(parse("graph { a:p:_ -- b:q:c }").is_ok());
+    }
+
+    #[test]
+    fn anonymous_subgraphs_are_statements_and_edge_endpoints() {
+        assert!(matches!(
+            process_stmt(_parse("{ a b }", Rule::stmt)),
+            Stmt::Subgraph(_)
+        ));
+        assert!(matches!(
+            process_vertex(_parse("{ a b }", Rule::vertex)),
+            Vertex::S(_)
+        ));
+        assert!(parse("graph { {a b} -- c; { d } -- subgraph s { e } }").is_ok());
+    }
+
+    #[test]
+    fn carriage_returns_are_whitespace() {
+        assert!(parse("graph {\ra -- b\r}").is_ok());
+    }
 }
+
