@@ -52,10 +52,39 @@ fn process_attr(rule: Pair<Rule>) -> Attribute {
 
 fn process_id(rule: Pair<Rule>) -> Id {
     let val = rule.as_str().to_string();
-    match down(rule).as_rule() {
+    let inner = down(rule);
+    match inner.as_rule() {
         Rule::plain => Id::Plain(val),
         Rule::html => Id::Html(val),
-        Rule::string_qt => Id::Escaped(val),
+        // DOT concatenates quoted contents, retaining attribute escapes.
+        Rule::quoted_id => {
+            let mut joined = String::from("\"");
+            for part in inner.into_inner() {
+                let raw = part.as_str();
+                let mut chars = raw[1..raw.len() - 1].chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        match chars.peek() {
+                            Some('\n') => { chars.next(); continue; }
+                            Some('\r') => {
+                                chars.next();
+                                if chars.peek() == Some(&'\n') { chars.next(); }
+                                continue;
+                            }
+                            Some(_) => {
+                                joined.push(c);
+                                joined.push(chars.next().unwrap());
+                                continue;
+                            }
+                            None => {}
+                        }
+                    }
+                    joined.push(c);
+                }
+            }
+            joined.push('"');
+            Id::Escaped(joined)
+        }
         p => panic!("unreachable, got {:?}", p),
     }
 }
@@ -78,7 +107,10 @@ fn process_port(port: Pair<Rule>) -> Port {
             Rule::id => {
                 let mb_id_mb_compass = process_id(r);
                 if let Some(r) = port_r.next() {
-                    Port(Some(mb_id_mb_compass), Some(r.as_str().to_string()))
+                    let compass = match process_id(down(r)) {
+                        Id::Plain(v) | Id::Escaped(v) | Id::Html(v) | Id::Anonymous(v) => v,
+                    };
+                    Port(Some(mb_id_mb_compass), Some(compass))
                 } else {
                     parse_compass_manually(mb_id_mb_compass.clone())
                         .map(|s| Port(None, Some(s)))
@@ -104,6 +136,9 @@ fn process_node_id(rule: Pair<Rule>) -> NodeId {
 
 fn process_subgraph(rule: Pair<Rule>) -> Subgraph {
     let mut sub_r = rule.into_inner();
+    if matches!(sub_r.peek().map(|r| r.as_rule()), Some(Rule::subgraph_keyword)) {
+        sub_r.next();
+    }
     let id = match sub_r.peek().map(|r| r.as_rule()) {
         Some(Rule::id) => process_id(sub_r.next().unwrap()),
         _ => Id::Anonymous(String::new()),
@@ -183,9 +218,9 @@ fn process_edge_stmt(rule: Pair<Rule>) -> Edge {
 
 fn process_attr_stmt(rule: Pair<Rule>) -> GraphAttributes {
     let mut stmts_r = rule.into_inner();
-    let mark = stmts_r.next().unwrap().as_str();
+    let mark = stmts_r.next().unwrap().as_str().to_ascii_lowercase();
     let attrs = process_attr_list(stmts_r.next().unwrap());
-    GraphAttributes::new(mark, attrs)
+    GraphAttributes::new(&mark, attrs)
 }
 
 fn process_stmt(rule: Pair<Rule>) -> Stmt {
@@ -210,7 +245,7 @@ fn process_graph(rule: Pair<Rule>) -> Graph {
         _ => false,
     };
 
-    let is_di = matches!(graph_r.next().map(|r| r.as_str()), Some("digraph"));
+    let is_di = graph_r.next().unwrap().as_str().eq_ignore_ascii_case("digraph");
 
     let id = match graph_r.peek().map(|r| r.as_rule()) {
         Some(Rule::id) => process_id(graph_r.next().unwrap()),
